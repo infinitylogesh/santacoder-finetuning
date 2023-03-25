@@ -7,7 +7,7 @@ import os
 
 import numpy as np
 import torch
-from datasets import load_dataset
+from datasets import load_dataset,concatenate_datasets
 from torch.utils.data import IterableDataset
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
@@ -28,6 +28,7 @@ def get_args():
     parser.add_argument("--model_path", type=str, default="bigcode/santacoder")
     parser.add_argument("--dataset_name", type=str, default="bigcode/the-stack-dedup")
     parser.add_argument("--subset", type=str, default="data")
+    parser.add_argument("--subsets",nargs="+",default=None)
     parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--size_valid_set", type=int, default=4000)
     parser.add_argument("--streaming", action="store_true")
@@ -69,7 +70,8 @@ def chars_token_ratio(dataset, tokenizer, data_column, nb_examples=400):
     for _, example in tqdm(zip(range(nb_examples), iter(dataset)), total=nb_examples):
         total_characters += len(example[data_column])
         total_tokens += len(tokenizer(example[data_column]).tokens())
-
+    
+    print("Total characters and total tokens",total_characters,total_tokens)
     return total_characters / total_tokens
 
 
@@ -173,14 +175,34 @@ class ConstantLengthDataset(IterableDataset):
 
 
 def create_datasets(tokenizer, args):
-    dataset = load_dataset(
-        args.dataset_name,
-        data_dir=args.subset,
-        split=args.split,
-        use_auth_token=True,
-        num_proc=args.num_workers if not args.streaming else None,
-        streaming=args.streaming,
-    )
+    
+    if args.subsets is None:
+    
+        dataset = load_dataset(
+            args.dataset_name,
+            data_dir=args.subset,
+            split=args.split,
+            use_auth_token=True,
+            num_proc=args.num_workers if not args.streaming else None,
+            streaming=args.streaming,
+        )
+    else:
+        print(f"Loading multiple subsets - {args.subsets}")
+        datasets = []
+        for subset in args.subsets:
+            dataset = load_dataset(
+                args.dataset_name,
+                data_dir=subset,
+                split = args.split,
+                use_auth_token=True,
+                num_proc=args.num_workers if not args.streaming else None,
+                streaming=args.streaming,
+            )
+            print(f"Size of the {subset} subset: {len(dataset)}")
+            datasets.append(dataset) 
+        dataset = concatenate_datasets(datasets)
+        print(f"Size of the concatenated dataset: {len(dataset)}")
+            
     if args.streaming:
         print("Loading the dataset in streaming mode")
         valid_data = dataset.take(args.size_valid_set)
@@ -209,7 +231,7 @@ def create_datasets(tokenizer, args):
     valid_dataset = ConstantLengthDataset(
         tokenizer,
         valid_data,
-        infinite=False,
+        infinite=False, 
         seq_length=args.seq_length,
         chars_per_token=chars_per_token,
         content_field=args.data_column,
@@ -232,6 +254,8 @@ def run_training(args, train_data, val_data):
     train_data.start_iteration = 0
 
     print(f"Starting main loop")
+    
+    #import pdb;pdb.set_trace()
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
@@ -252,7 +276,9 @@ def run_training(args, train_data, val_data):
         bf16=args.bf16,
         weight_decay=args.weight_decay,
         run_name=f"santacoder-{args.subset}",
+        optim="adafactor",
         report_to="wandb",
+        save_total_limit= 1 if args.save_freq > 0 else 0,
     )
 
     trainer = Trainer(
